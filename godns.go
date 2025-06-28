@@ -141,14 +141,15 @@ func initDB() {
 
 func init() {
 	ensureRoot()
+	if len(os.Args) > 1 && os.Args[1] != "-config" {
+		initDB()
+	}
 }
 
 func main() {
-	ckdbconn := true
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "-config":
-			ckdbconn = false
 			editConfigFile()
 			return
 		case "-ban":
@@ -170,10 +171,6 @@ func main() {
 			UnblockIP(os.Args[2])
 			return
 		}
-	}
-
-	if ckdbconn {
-		initDB()
 	}
 
 	go startTCPForwarding(config) //TCP 포워딩 시작
