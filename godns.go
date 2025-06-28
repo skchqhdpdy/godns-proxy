@@ -141,7 +141,7 @@ func initDB() {
 
 func init() {
 	ensureRoot()
-	if len(os.Args) > 1 && os.Args[1] != "-config" {
+	if len(os.Args) == 1 || os.Args[1] != "-config" {
 		initDB()
 	}
 }
