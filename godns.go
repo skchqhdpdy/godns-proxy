@@ -105,6 +105,62 @@ func DeleteIP(IP string) {
 		fmt.Printf("IP %s 삭제됨 (기존 메모: %s)\n", IP, BR.String)
 	}
 }
+func ShowIP(IP string) {
+	var id, count, blocked, lastSeen int64
+	var server, memo sql.NullString
+
+	err := db.QueryRow("SELECT id, memo, server, count, Last_seen, blocked FROM ips WHERE ip = ?", IP).
+		Scan(&id, &memo, &server, &count, &lastSeen, &blocked)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			fmt.Printf("IP %s 정보가 없습니다.\n", IP)
+			return
+		}
+		log.Printf("DB 조회 오류: %v\n", err)
+		return
+	}
+
+	// lastSeen을 사용자 로컬 타임존 시간으로 변환
+	t := time.Unix(lastSeen, 0).In(time.Local)
+	formattedTime := t.Format("2006-01-02 15:04:05 MST")
+
+	fmt.Printf(
+		"id: %d, IP: %s, memo: %s, server: %s, count: %d, Last_seen: %s(%d), blocked: %d\n",
+		id, IP, memo.String, server.String, count, formattedTime, lastSeen, blocked,
+	)
+}
+func RecentIP(column string, limit string) {
+	query := fmt.Sprintf(
+		"SELECT id, IP, memo, server, count, Last_seen, blocked FROM ips ORDER BY %s DESC LIMIT %s",
+		column, limit,
+	)
+
+	rows, err := db.Query(query)
+	if err != nil {
+		log.Printf("DB 쿼리 오류: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, count, blocked, lastSeen int64
+		var IP, server, memo sql.NullString
+
+		err := rows.Scan(&id, &IP, &memo, &server, &count, &lastSeen, &blocked)
+		if err != nil {
+			log.Printf("행 스캔 실패: %v\n", err)
+			continue
+		}
+
+		t := time.Unix(lastSeen, 0).In(time.Local)
+		formattedTime := t.Format("2006-01-02 15:04:05 MST")
+
+		fmt.Printf(
+			"id: %d, IP: %s, memo: %s, server: %s, count: %d, Last_seen: %s(%d), blocked: %d\n",
+			id, IP.String, memo.String, server.String, count, formattedTime, lastSeen, blocked,
+		)
+	}
+}
 func IsIPBlocked(IP string) bool {
 	var blocked int
 	err := db.QueryRow("SELECT blocked FROM ips WHERE IP = ?", IP).Scan(&blocked)
@@ -166,6 +222,16 @@ func init() {
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "-h":
+			log.Print(
+				"사용법:\n" +
+					"    -config\n" +
+					"    -ban <IP> [Reason]\n" +
+					"    -unban <IP>\n" +
+					"    -del <IP>\n" +
+					"    -show <IP>\n" +
+					"    -recent <DB_column> <Amount>\n")
+			return
 		case "-config":
 			editConfigFile()
 			return
@@ -194,11 +260,25 @@ func main() {
 			}
 			DeleteIP(os.Args[2])
 			return
+		case "-show":
+			if len(os.Args) < 3 {
+				fmt.Println("사용법: -show <IP>")
+				return
+			}
+			ShowIP(os.Args[2])
+			return
+		case "-recent":
+			if len(os.Args) < 4 {
+				fmt.Println("사용법: -recent <DB_column> <Amount>")
+				return
+			}
+			RecentIP(os.Args[2], os.Args[3])
+			return
 		}
 	}
 
 	go startTCPForwarding(config) //TCP 포워딩 시작
-	go startUDPForwarding(config) //UDP 포워딩 시작
+	startUDPForwarding(config)    //UDP 포워딩 시작
 }
 
 func startTCPForwarding(config Config) {
@@ -300,21 +380,21 @@ func startUDPForwarding(config Config) {
 			continue
 		}
 
-		remoteIP := clientAddr.IP.String()
-		if IsIPBlocked(remoteIP) {
-			log.Printf("차단된 IP UDP 패킷 차단: %s", remoteIP)
-
-			refusedResp := RefusedResponse(buf[:n])
-			if refusedResp != nil {
-				_, err := conn.WriteToUDP(refusedResp, clientAddr)
-				if err != nil {
-					log.Printf("UDP 차단 응답 전송 실패: %v", err)
-				}
-			}
-			continue
-		}
-
 		go func(data []byte, addr *net.UDPAddr) {
+			remoteIP := clientAddr.IP.String()
+			if IsIPBlocked(remoteIP) {
+				log.Printf("차단된 IP UDP 패킷 차단: %s", remoteIP)
+
+				refusedResp := RefusedResponse(buf[:n])
+				if refusedResp != nil {
+					_, err := conn.WriteToUDP(refusedResp, clientAddr)
+					if err != nil {
+						log.Printf("UDP 차단 응답 전송 실패: %v", err)
+					}
+				}
+				return
+			}
+
 			remoteConn, err := net.DialUDP("udp", nil, remoteAddr)
 			if err != nil {
 				log.Printf("UDP 원격 연결 실패: %v", err)
