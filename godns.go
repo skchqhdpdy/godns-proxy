@@ -88,6 +88,23 @@ func UnblockIP(IP string) {
 		fmt.Printf("IP %s 해제됨 (기존 차단 사유: %s)\n", IP, BR.String)
 	}
 }
+func DeleteIP(IP string) {
+	var BR sql.NullString
+	db.QueryRow("SELECT memo FROM ips WHERE ip = ?", IP).Scan(&BR)
+
+	query := `DELETE FROM ips WHERE ip = ?`
+	res, err := db.Exec(query, IP)
+	if err != nil {
+		log.Printf("IP 삭제 실패: %v", err)
+		return
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		fmt.Printf("IP %s 는 존재하지 않습니다\n", IP)
+	} else {
+		fmt.Printf("IP %s 삭제됨 (기존 메모: %s)\n", IP, BR.String)
+	}
+}
 func IsIPBlocked(IP string) bool {
 	var blocked int
 	err := db.QueryRow("SELECT blocked FROM ips WHERE IP = ?", IP).Scan(&blocked)
@@ -170,11 +187,18 @@ func main() {
 			}
 			UnblockIP(os.Args[2])
 			return
+		case "-del":
+			if len(os.Args) < 3 {
+				fmt.Println("사용법: -del <IP>")
+				return
+			}
+			DeleteIP(os.Args[2])
+			return
 		}
 	}
 
 	go startTCPForwarding(config) //TCP 포워딩 시작
-	startUDPForwarding(config)    //UDP 포워딩 시작
+	go startUDPForwarding(config) //UDP 포워딩 시작
 }
 
 func startTCPForwarding(config Config) {
