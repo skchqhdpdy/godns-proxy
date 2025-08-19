@@ -33,6 +33,8 @@ var defaultConfig = Config{
 	LocalAddr:         "ns1.aodd.xyz",
 }
 
+const version = "2.2.0"
+
 var configFilePath string = getConfigPath()
 var config Config = loadConfig()
 var localPort = ":53"
@@ -56,15 +58,14 @@ func BlockIP(IP string, reason string) {
 	}
 
 	query := `
-	INSERT INTO ips (ip, memo, server, count, last_seen, blocked)
-	VALUES (?, ?, ?, 1, ?, 1)
+	INSERT INTO ips (ip, memo, server, count, blocked)
+	VALUES (?, ?, ?, 1, 1)
 	ON DUPLICATE KEY UPDATE
 		memo = VALUES(memo),
 		server = VALUES(server),
-		last_seen = VALUES(last_seen),
 		blocked = VALUES(blocked)
 	`
-	_, err := db.Exec(query, IP, memo, config.LocalAddr, time.Now().Unix())
+	_, err := db.Exec(query, IP, memo, config.LocalAddr)
 	if err != nil {
 		log.Printf("IP 차단/업데이트 실패: %v", err)
 		return
@@ -129,6 +130,32 @@ func ShowIP(IP string) {
 		id, IP, memo.String, server.String, count, formattedTime, lastSeen, blocked,
 	)
 }
+func MemoIP(IP string, reason string) {
+	var BR sql.NullString
+	db.QueryRow("SELECT memo FROM ips WHERE ip = ?", IP).Scan(&BR)
+
+	var memo interface{}
+	if reason == "" {
+		memo = nil
+	} else {
+		memo = reason
+	}
+
+	query := `
+	INSERT INTO ips (ip, memo, server, count, blocked)
+	VALUES (?, ?, ?, 1, 1)
+	ON DUPLICATE KEY UPDATE
+		memo = VALUES(memo),
+		server = VALUES(server),
+		blocked = VALUES(blocked)
+	`
+	_, err := db.Exec(query, IP, memo, config.LocalAddr)
+	if err != nil {
+		log.Printf("IP 업데이트 실패: %v", err)
+		return
+	}
+	fmt.Printf("IP %s memo 변경됨 (사유: %v) --> (사유: %v)\n", IP, BR.String, reason)
+}
 func RecentIP(column string, limit string) {
 	query := fmt.Sprintf(
 		"SELECT id, IP, memo, server, count, Last_seen, blocked FROM ips ORDER BY %s DESC LIMIT %s",
@@ -162,27 +189,26 @@ func RecentIP(column string, limit string) {
 	}
 }
 func IsIPBlocked(IP string) bool {
-	var blocked int
+	var blocked bool
 	err := db.QueryRow("SELECT blocked FROM ips WHERE IP = ?", IP).Scan(&blocked)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("IP 차단 상태 조회 실패: %v", err)
 		}
-		blocked = 0
 	}
 
 	query := `
-	INSERT INTO ips (IP, server, count, last_seen)
-	VALUES (?, ?, 1, ?)
+	INSERT INTO ips (IP, server, count)
+	VALUES (?, ?, 1)
 	ON DUPLICATE KEY UPDATE
 		count = count + 1,
-		last_seen = VALUES(last_seen)
+		last_seen = DEFAULT(last_seen)
 	`
-	_, err = db.Exec(query, IP, config.LocalAddr, time.Now().Unix())
+	_, err = db.Exec(query, IP, config.LocalAddr)
 	if err != nil {
 		log.Printf("IP 정보 로깅 실패: %v", err)
 	}
-	return blocked == 1
+	return blocked
 }
 func RefusedResponse(req []byte) []byte {
 	if len(req) < 12 {
@@ -214,6 +240,7 @@ func initDB() {
 
 func init() {
 	ensureRoot()
+	log.Printf("Version : %s", version)
 	if len(os.Args) == 1 || os.Args[1] != "-config" {
 		initDB()
 	}
@@ -230,6 +257,7 @@ func main() {
 					"    -unban <IP>\n" +
 					"    -del <IP>\n" +
 					"    -show <IP>\n" +
+					"    -memo <IP> [Memo]\n" +
 					"    -recent <DB_column> <Amount>\n")
 			return
 		case "-config":
@@ -266,6 +294,17 @@ func main() {
 				return
 			}
 			ShowIP(os.Args[2])
+			return
+		case "-memo":
+			if len(os.Args) < 3 {
+				fmt.Println("사용법: -memo <IP> [Memo]")
+				return
+			}
+			memo := ""
+			if len(os.Args) > 3 {
+				memo = strings.Join(os.Args[3:], " ")
+			}
+			MemoIP(os.Args[2], memo)
 			return
 		case "-recent":
 			if len(os.Args) < 4 {
