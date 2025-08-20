@@ -33,12 +33,18 @@ var defaultConfig = Config{
 	LocalAddr:         "ns1.aodd.xyz",
 }
 
-const version = "2.2.0"
+const version = "2.3.0"
 
 var configFilePath string = getConfigPath()
 var config Config = loadConfig()
 var localPort = ":53"
 var db *sql.DB
+
+func Errorf(format string, v ...interface{}) {
+	prefix := "\033[91m"
+	suffix := "\033[0m"
+	log.Printf(prefix+format+suffix, v...)
+}
 
 func BlockIP(IP string, reason string) {
 	var blocked int
@@ -67,7 +73,7 @@ func BlockIP(IP string, reason string) {
 	`
 	_, err := db.Exec(query, IP, memo, config.LocalAddr)
 	if err != nil {
-		log.Printf("IP 차단/업데이트 실패: %v", err)
+		Errorf("IP 차단/업데이트 실패: %v", err)
 		return
 	}
 	fmt.Printf("IP %s 차단됨 (사유: %v)\n", IP, reason)
@@ -79,7 +85,7 @@ func UnblockIP(IP string) {
 	query := `UPDATE ips SET blocked = 0, last_seen = ?, memo = NULL WHERE IP = ? AND blocked = 1`
 	res, err := db.Exec(query, time.Now().Unix(), IP)
 	if err != nil {
-		log.Printf("IP 해제 실패: %v", err)
+		Errorf("IP 해제 실패: %v", err)
 		return
 	}
 	affected, _ := res.RowsAffected()
@@ -96,7 +102,7 @@ func DeleteIP(IP string) {
 	query := `DELETE FROM ips WHERE ip = ?`
 	res, err := db.Exec(query, IP)
 	if err != nil {
-		log.Printf("IP 삭제 실패: %v", err)
+		Errorf("IP 삭제 실패: %v", err)
 		return
 	}
 	affected, _ := res.RowsAffected()
@@ -117,7 +123,7 @@ func ShowIP(IP string) {
 			fmt.Printf("IP %s 정보가 없습니다.\n", IP)
 			return
 		}
-		log.Printf("DB 조회 오류: %v\n", err)
+		Errorf("DB 조회 오류: %v\n", err)
 		return
 	}
 
@@ -151,7 +157,7 @@ func MemoIP(IP string, reason string) {
 	`
 	_, err := db.Exec(query, IP, memo, config.LocalAddr)
 	if err != nil {
-		log.Printf("IP 업데이트 실패: %v", err)
+		Errorf("IP 업데이트 실패: %v", err)
 		return
 	}
 	fmt.Printf("IP %s memo 변경됨 (사유: %v) --> (사유: %v)\n", IP, BR.String, reason)
@@ -164,7 +170,7 @@ func RecentIP(column string, limit string) {
 
 	rows, err := db.Query(query)
 	if err != nil {
-		log.Printf("DB 쿼리 오류: %v\n", err)
+		Errorf("DB 쿼리 오류: %v\n", err)
 		return
 	}
 	defer rows.Close()
@@ -175,7 +181,7 @@ func RecentIP(column string, limit string) {
 
 		err := rows.Scan(&id, &IP, &memo, &server, &count, &lastSeen, &blocked)
 		if err != nil {
-			log.Printf("행 스캔 실패: %v\n", err)
+			Errorf("행 스캔 실패: %v\n", err)
 			continue
 		}
 
@@ -193,7 +199,7 @@ func IsIPBlocked(IP string) bool {
 	err := db.QueryRow("SELECT blocked FROM ips WHERE IP = ?", IP).Scan(&blocked)
 	if err != nil {
 		if err != sql.ErrNoRows {
-			log.Printf("IP 차단 상태 조회 실패: %v", err)
+			Errorf("IP 차단 상태 조회 실패: %v", err)
 		}
 	}
 
@@ -206,7 +212,7 @@ func IsIPBlocked(IP string) bool {
 	`
 	_, err = db.Exec(query, IP, config.LocalAddr)
 	if err != nil {
-		log.Printf("IP 정보 로깅 실패: %v", err)
+		Errorf("IP 정보 로깅 실패: %v", err)
 	}
 	return blocked
 }
@@ -214,15 +220,77 @@ func RefusedResponse(req []byte) []byte {
 	if len(req) < 12 {
 		return nil
 	}
-	res := make([]byte, len(req))
-	copy(res, req)
-	res[2] |= 0x80
-	res[2] &^= 0x70
+	res := make([]byte, 12)
+	copy(res, req[:12])
+	res[2] = (res[2] | 0x80) &^ 0x70
 	res[3] = 0x05
+	res[4], res[5] = req[4], req[5]
 	for i := 6; i < 12; i++ {
 		res[i] = 0
 	}
-	return res
+	qLen := 0 //질문 섹션 길이 안전 계산
+	if len(req) > 12 {
+		pos := 12 //실제 질문 섹션 끝까지 찾기 (QNAME 끝 + QTYPE 2 + QCLASS 2)
+		for pos < len(req) && req[pos] != 0 {
+			pos += int(req[pos]) + 1
+		}
+		pos += 1 + 4 //QNAME 끝 0 + QTYPE 2 + QCLASS 2
+		if pos <= len(req) {
+			qLen = pos - 12
+		} else {
+			qLen = len(req) - 12
+		}
+	}
+	packet := make([]byte, 12+qLen)
+	copy(packet[:12], res)
+	if qLen > 0 {
+		copy(packet[12:], req[12:12+qLen])
+	}
+	return packet
+}
+func parseDNSRequest(data []byte) (string, string) {
+	// dnstype.json 읽기
+	file, err := os.ReadFile("dnstype.json")
+	if err != nil {
+		return "UNKNOWN", "UNKNOWN"
+	}
+	var typeMap map[string]string
+	json.Unmarshal(file, &typeMap)
+
+	if len(data) < 12 {
+		return "INVALID", ""
+	}
+	qdcount := int(data[4])<<8 | int(data[5])
+	if qdcount == 0 {
+		return "NONE", ""
+	}
+
+	// 도메인 추출
+	pos := 12
+	var domainParts []string
+	for {
+		l := int(data[pos])
+		if l == 0 {
+			pos++
+			break
+		}
+		if pos+l+1 > len(data) {
+			break
+		}
+		domainParts = append(domainParts, string(data[pos+1:pos+1+l]))
+		pos += l + 1
+	}
+	domain := strings.Join(domainParts, ".")
+
+	if pos+2 > len(data) {
+		return "UNKNOWN", domain
+	}
+	typNum := int(data[pos])<<8 | int(data[pos+1])
+	typStr := typeMap[fmt.Sprintf("%d", typNum)]
+	if typStr == "" {
+		typStr = fmt.Sprintf("TYPE%d", typNum)
+	}
+	return typStr, domain
 }
 
 func initDB() {
@@ -235,12 +303,12 @@ func initDB() {
 	if err := db.Ping(); err != nil {
 		log.Fatalf("DB Ping 실패: %v", err)
 	}
-	log.Println("MySQL 연결 성공")
+	log.Printf("MySQL 연결 성공")
 }
 
 func init() {
 	ensureRoot()
-	log.Printf("Version : %s", version)
+	log.Printf("Version : \033[92m%s\033[0m", version)
 	if len(os.Args) == 1 || os.Args[1] != "-config" {
 		initDB()
 	}
@@ -323,7 +391,7 @@ func main() {
 func startTCPForwarding(config Config) {
 	listener, err := net.Listen("tcp", localPort)
 	if err != nil {
-		log.Printf("TCP 포트 %s에서 리스닝 실패: %v", localPort, err)
+		Errorf("TCP 포트 %s에서 리스닝 실패: %v", localPort, err)
 		pauseConsole()
 		return
 	}
@@ -334,7 +402,7 @@ func startTCPForwarding(config Config) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("TCP 연결 수락 실패: %v", err)
+			Errorf("TCP 연결 수락 실패: %v", err)
 			continue
 		}
 		go handleTCPConnection(conn, config)
@@ -345,49 +413,56 @@ func handleTCPConnection(localConn net.Conn, config Config) {
 	defer localConn.Close()
 
 	remoteIP, _, _ := net.SplitHostPort(localConn.RemoteAddr().String())
-	if IsIPBlocked(remoteIP) {
-		log.Printf("차단된 IP TCP 패킷 차단: %s", remoteIP)
+	buf := make([]byte, 4096) //TCP 요청 전체 읽기
+	_, err := io.ReadFull(localConn, buf[:2])
+	if err != nil {
+		Errorf("TCP 길이 읽기 실패: %v", err)
+		return
+	}
+	packetLen := int(buf[0])<<8 | int(buf[1])
+	if packetLen > len(buf)-2 {
+		Errorf("TCP 패킷 크기 초과")
+		return
+	}
+	_, err = io.ReadFull(localConn, buf[2:2+packetLen])
+	if err != nil {
+		Errorf("TCP 패킷 읽기 실패: %v", err)
+		return
+	}
+	rqType, rqDomain := parseDNSRequest(buf[2 : 2+packetLen])
 
-		buf := make([]byte, 4096)
-		_, err := io.ReadFull(localConn, buf[:2])
-		if err != nil {
-			log.Printf("TCP 차단 응답 읽기 실패: %v", err)
-			return
-		}
-		packetLen := int(buf[0])<<8 | int(buf[1])
-		if packetLen > len(buf)-2 {
-			log.Printf("TCP 차단 패킷 크기 초과")
-			return
-		}
-		_, err = io.ReadFull(localConn, buf[2:2+packetLen])
-		if err != nil {
-			log.Printf("TCP 차단 응답 DNS 패킷 읽기 실패: %v", err)
-			return
-		}
+	if IsIPBlocked(remoteIP) {
+		log.Printf("차단된 IP TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
 		resp := RefusedResponse(buf[2 : 2+packetLen])
 		if resp == nil {
 			return
 		}
 		respWithLen := make([]byte, 2+len(resp))
 		respWithLen[0] = byte(len(resp) >> 8)
-		respWithLen[1] = byte(len(resp))
+		respWithLen[1] = byte(len(resp) & 0xFF)
 		copy(respWithLen[2:], resp)
 		_, err = localConn.Write(respWithLen)
 		if err != nil {
-			log.Printf("TCP 차단 응답 전송 실패: %v", err)
+			Errorf("TCP 차단 응답 전송 실패: %v", err)
 		}
 		return
 	}
 
 	remoteConn, err := net.Dial("tcp", config.RemoteAddr)
 	if err != nil {
-		log.Printf("원격 TCP 서버 연결 실패: %v", err)
+		Errorf("원격 TCP 서버 연결 실패: %v", err)
 		return
 	}
 	defer remoteConn.Close()
 
-	log.Printf("TCP 연결됨: %s -> %s -> %s | %d", localConn.RemoteAddr(), config.LocalAddr+localPort, config.RemoteAddr, time.Now().Unix())
-	go sendToDiscord(fmt.Sprintf("TCP 연결됨: %s -> %s -> %s | <t:%d:F>", localConn.RemoteAddr(), config.LocalAddr+localPort, config.RemoteAddr, time.Now().Unix()))
+	_, err = remoteConn.Write(buf[:2+packetLen]) //첫 패킷을 remote 서버로 직접 Write
+	if err != nil {
+		Errorf("TCP 첫 패킷 전달 실패: %v", err)
+		return
+	}
+
+	log.Printf("TCP 연결됨: \033[92m%s\033[0m -> %s -> %s | Type: \033[92m%s\033[0m, Domain: \033[92m%s\033[0m | %d", localConn.RemoteAddr(), config.LocalAddr+localPort, config.RemoteAddr, rqType, rqDomain, time.Now().Unix())
+	go sendToDiscord(fmt.Sprintf("TCP 연결됨: `%s` -> %s -> %s | Type: `%s`, Domain: `%s` | <t:%d:F>", localConn.RemoteAddr(), config.LocalAddr+localPort, config.RemoteAddr, rqType, rqDomain, time.Now().Unix()))
 
 	go io.Copy(remoteConn, localConn)
 	io.Copy(localConn, remoteConn)
@@ -414,21 +489,21 @@ func startUDPForwarding(config Config) {
 	buf := make([]byte, 65535)
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buf)
+		rqType, rqDomain := parseDNSRequest(buf[:n])
 		if err != nil {
-			log.Printf("UDP 읽기 오류: %v", err)
+			Errorf("UDP 읽기 오류: %v", err)
 			continue
 		}
 
 		go func(data []byte, addr *net.UDPAddr) {
 			remoteIP := clientAddr.IP.String()
 			if IsIPBlocked(remoteIP) {
-				log.Printf("차단된 IP UDP 패킷 차단: %s", remoteIP)
-
+				log.Printf("차단된 IP UDP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
 				refusedResp := RefusedResponse(buf[:n])
 				if refusedResp != nil {
 					_, err := conn.WriteToUDP(refusedResp, clientAddr)
 					if err != nil {
-						log.Printf("UDP 차단 응답 전송 실패: %v", err)
+						Errorf("UDP 차단 응답 전송 실패: %v", err)
 					}
 				}
 				return
@@ -436,24 +511,24 @@ func startUDPForwarding(config Config) {
 
 			remoteConn, err := net.DialUDP("udp", nil, remoteAddr)
 			if err != nil {
-				log.Printf("UDP 원격 연결 실패: %v", err)
+				Errorf("UDP 원격 연결 실패: %v", err)
 				return
 			}
 			defer remoteConn.Close()
 
-			log.Printf("UDP 연결됨: %s -> %s -> %s | %d", addr, config.LocalAddr+localPort, config.RemoteAddr, time.Now().Unix())
-			go sendToDiscord(fmt.Sprintf("UDP 연결됨: %s -> %s -> %s | <t:%d:F>", addr, config.LocalAddr+localPort, config.RemoteAddr, time.Now().Unix()))
+			log.Printf("UDP 연결됨: \033[92m%s\033[0m -> %s -> %s | Type: \033[92m%s\033[0m, Domain: \033[92m%s\033[0m | %d", addr, config.LocalAddr+localPort, config.RemoteAddr, rqType, rqDomain, time.Now().Unix())
+			go sendToDiscord(fmt.Sprintf("UDP 연결됨: `%s` -> %s -> %s | Type: `%s`, Domain: `%s` | <t:%d:F>", addr, config.LocalAddr+localPort, config.RemoteAddr, rqType, rqDomain, time.Now().Unix()))
 
 			_, err = remoteConn.Write(data)
 			if err != nil {
-				log.Printf("UDP 쓰기 실패: %v", err)
+				Errorf("UDP 쓰기 실패: %v", err)
 				return
 			}
 
 			remoteConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			n, _, err := remoteConn.ReadFrom(buf)
 			if err != nil {
-				log.Printf("UDP 응답 없음 또는 읽기 실패: %v", err)
+				Errorf("UDP 응답 없음 또는 읽기 실패: %v", err)
 				return
 			}
 
@@ -466,13 +541,13 @@ func sendToDiscord(message string) {
 	payload := map[string]string{"content": message}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Discord 메시지 전송 실패: %v", err)
+		Errorf("Discord 메시지 전송 실패: %v", err)
 		return
 	}
 
 	_, err = http.Post(config.DiscordWebhookURL, "application/json", bytes.NewReader(payloadBytes))
 	if err != nil {
-		log.Printf("Discord 웹훅 요청 실패: %v", err)
+		Errorf("Discord 웹훅 요청 실패: %v", err)
 	}
 }
 
@@ -488,7 +563,7 @@ func ensureRoot() {
 
 func loadConfig() Config {
 	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
-		log.Printf("설정 파일 없음. 기본 설정 파일을 생성합니다: %s", configFilePath)
+		Errorf("설정 파일 없음. 기본 설정 파일을 생성합니다: %s", configFilePath)
 		file, err := os.Create(configFilePath)
 		if err != nil {
 			log.Fatalf("설정 파일 생성 실패: %v", err)
