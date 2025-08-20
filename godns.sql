@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS `ips` (
   `server` varchar(50) DEFAULT 'ns.aodd.xyz',
   `count` int(11) NOT NULL DEFAULT 0,
   `Last_seen` bigint(20) NOT NULL DEFAULT unix_timestamp(),
-  `blocked` tinyint(4) NOT NULL DEFAULT 0,
+  `blocked` tinyint(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   UNIQUE KEY `IP` (`IP`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
