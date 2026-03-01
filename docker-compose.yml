@@ -1,0 +1,12 @@
+services:
+  godns:
+    image: godns:latest
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    cap_add:
+      - NET_ADMIN
+    tty: true
+    init: true
+    volumes:
+      - .:/etc/godns
