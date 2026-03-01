@@ -33,8 +33,9 @@ var defaultConfig = Config{
 	LocalAddr:         "ns1.aodd.xyz",
 }
 
-const version = "2.3.0"
+const version = "2.4.2"
 
+var dnstypes map[string]string
 var configFilePath string = getConfigPath()
 var config Config = loadConfig()
 var localPort = ":53"
@@ -216,6 +217,16 @@ func IsIPBlocked(IP string) bool {
 	}
 	return blocked
 }
+func IsDomainBlocked(Domain string) bool {
+	var blocked bool
+	err := db.QueryRow("SELECT blocked FROM filters WHERE value = ?", Domain).Scan(&blocked)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			Errorf("filter 차단 상태 조회 실패: %v", err)
+		}
+	}
+	return blocked
+}
 func RefusedResponse(req []byte) []byte {
 	if len(req) < 12 {
 		return nil
@@ -249,14 +260,6 @@ func RefusedResponse(req []byte) []byte {
 	return packet
 }
 func parseDNSRequest(data []byte) (string, string) {
-	// dnstype.json 읽기
-	file, err := os.ReadFile("dnstype.json")
-	if err != nil {
-		return "UNKNOWN", "UNKNOWN"
-	}
-	var typeMap map[string]string
-	json.Unmarshal(file, &typeMap)
-
 	if len(data) < 12 {
 		return "INVALID", ""
 	}
@@ -286,7 +289,7 @@ func parseDNSRequest(data []byte) (string, string) {
 		return "UNKNOWN", domain
 	}
 	typNum := int(data[pos])<<8 | int(data[pos+1])
-	typStr := typeMap[fmt.Sprintf("%d", typNum)]
+	typStr := dnstypes[fmt.Sprintf("%d", typNum)]
 	if typStr == "" {
 		typStr = fmt.Sprintf("TYPE%d", typNum)
 	}
@@ -312,6 +315,12 @@ func init() {
 	if len(os.Args) == 1 || os.Args[1] != "-config" {
 		initDB()
 	}
+
+	file, err := os.ReadFile("dnstype.json") // dnstype.json 읽기
+	if err != nil {
+		log.Fatalf("Critical Error: dnstype.json 파일을 찾을 수 없습니다: %v", err)
+	}
+	json.Unmarshal(file, &dnstypes)
 }
 
 func main() {
@@ -411,9 +420,10 @@ func startTCPForwarding(config Config) {
 
 func handleTCPConnection(localConn net.Conn, config Config) {
 	defer localConn.Close()
+	localConn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	remoteIP, _, _ := net.SplitHostPort(localConn.RemoteAddr().String())
-	buf := make([]byte, 4096) //TCP 요청 전체 읽기
+	buf := make([]byte, 65535) //TCP 요청 전체 읽기
 	_, err := io.ReadFull(localConn, buf[:2])
 	if err != nil {
 		Errorf("TCP 길이 읽기 실패: %v", err)
@@ -432,7 +442,22 @@ func handleTCPConnection(localConn net.Conn, config Config) {
 	rqType, rqDomain := parseDNSRequest(buf[2 : 2+packetLen])
 
 	if IsIPBlocked(remoteIP) {
-		log.Printf("차단된 IP TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
+		log.Printf("차단된 IP | TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
+		resp := RefusedResponse(buf[2 : 2+packetLen])
+		if resp == nil {
+			return
+		}
+		respWithLen := make([]byte, 2+len(resp))
+		respWithLen[0] = byte(len(resp) >> 8)
+		respWithLen[1] = byte(len(resp) & 0xFF)
+		copy(respWithLen[2:], resp)
+		_, err = localConn.Write(respWithLen)
+		if err != nil {
+			Errorf("TCP 차단 응답 전송 실패: %v", err)
+		}
+		return
+	} else if IsDomainBlocked(rqDomain) {
+		log.Printf("차단된 filter (\033[91m%s\033[0m) | TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", rqDomain, remoteIP, rqType, rqDomain, time.Now().Unix())
 		resp := RefusedResponse(buf[2 : 2+packetLen])
 		if resp == nil {
 			return
@@ -448,12 +473,13 @@ func handleTCPConnection(localConn net.Conn, config Config) {
 		return
 	}
 
-	remoteConn, err := net.Dial("tcp", config.RemoteAddr)
+	remoteConn, err := net.DialTimeout("tcp", config.RemoteAddr, 5*time.Second)
 	if err != nil {
 		Errorf("원격 TCP 서버 연결 실패: %v", err)
 		return
 	}
 	defer remoteConn.Close()
+	remoteConn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	_, err = remoteConn.Write(buf[:2+packetLen]) //첫 패킷을 remote 서버로 직접 Write
 	if err != nil {
@@ -486,20 +512,32 @@ func startUDPForwarding(config Config) {
 
 	log.Printf("UDP 포워딩 시작: %s -> %s", config.LocalAddr+localPort, config.RemoteAddr)
 
-	buf := make([]byte, 65535)
 	for {
+		buf := make([]byte, 65535)
 		n, clientAddr, err := conn.ReadFromUDP(buf)
-		rqType, rqDomain := parseDNSRequest(buf[:n])
 		if err != nil {
 			Errorf("UDP 읽기 오류: %v", err)
 			continue
 		}
 
+		packet := make([]byte, n, 65535)
+		copy(packet, buf[:n])
 		go func(data []byte, addr *net.UDPAddr) {
+			rqType, rqDomain := parseDNSRequest(data)
 			remoteIP := clientAddr.IP.String()
 			if IsIPBlocked(remoteIP) {
-				log.Printf("차단된 IP UDP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
-				refusedResp := RefusedResponse(buf[:n])
+				log.Printf("차단된 IP | UDP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
+				refusedResp := RefusedResponse(data)
+				if refusedResp != nil {
+					_, err := conn.WriteToUDP(refusedResp, clientAddr)
+					if err != nil {
+						Errorf("UDP 차단 응답 전송 실패: %v", err)
+					}
+				}
+				return
+			} else if IsDomainBlocked(rqDomain) {
+				log.Printf("차단된 filter (\033[91m%s\033[0m) | UDP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", rqDomain, remoteIP, rqType, rqDomain, time.Now().Unix())
+				refusedResp := RefusedResponse(data)
 				if refusedResp != nil {
 					_, err := conn.WriteToUDP(refusedResp, clientAddr)
 					if err != nil {
@@ -526,14 +564,14 @@ func startUDPForwarding(config Config) {
 			}
 
 			remoteConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			n, _, err := remoteConn.ReadFrom(buf)
+			n, _, err := remoteConn.ReadFrom(data[:cap(data)])
 			if err != nil {
 				Errorf("UDP 응답 없음 또는 읽기 실패: %v", err)
 				return
 			}
 
-			conn.WriteToUDP(buf[:n], addr)
-		}(buf[:n], clientAddr)
+			conn.WriteToUDP(data[:n], addr)
+		}(packet, clientAddr)
 	}
 }
 
