@@ -24,6 +24,7 @@ type Config struct {
 	DiscordWebhookURL string `json:"discordWebhookURL"`
 	RemoteAddr        string `json:"remoteAddr"`
 	LocalAddr         string `json:"localAddr"`
+	BlockDrop         int    `json:"blockDrop"`
 }
 
 var defaultConfig = Config{
@@ -31,9 +32,10 @@ var defaultConfig = Config{
 	DiscordWebhookURL: "your_webhook_url",
 	RemoteAddr:        "aodd.xyz:53",
 	LocalAddr:         "ns1.aodd.xyz",
+	BlockDrop:         1,
 }
 
-const version = "2.4.2"
+const version = "2.5.0"
 
 var dnstypes map[string]string
 var configFilePath string = getConfigPath()
@@ -228,6 +230,10 @@ func IsDomainBlocked(Domain string) bool {
 	return blocked
 }
 func RefusedResponse(req []byte) []byte {
+	if config.BlockDrop == 1 {
+		return nil
+	}
+
 	if len(req) < 12 {
 		return nil
 	}
