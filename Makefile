@@ -27,18 +27,22 @@ last?=1000
 logs:
 	docker compose logs -f godns --tail ${last}
 
-# IP 차단 명령어 (컨테이너 내부 실행)
+# IP 차단 명령어 (호스트에서 도커 경로 차단)
 drop:
 	@if [ -z "$(DROP_IP)" ]; then echo "사용법: make drop <IP>"; exit 1; fi
-	@echo "차단 중: $(DROP_IP)..."
-	docker compose exec -u root godns iptables -I INPUT -s $(DROP_IP) -j DROP
-	@echo "성공: 컨테이너 내부에서 $(DROP_IP)가 차단되었습니다."
+	@echo "도커 경로에서 차단 중: $(DROP_IP)..."
+	sudo iptables -I DOCKER-USER 1 -s $(DROP_IP) -j DROP
+        sudo netfilter-persistent save
+	@echo "성공: 호스트의 DOCKER-USER 체인에서 $(DROP_IP)가 차단되었습니다.\n"
 
 # IP 차단 해제
 undrop:
 	@if [ -z "$(DROP_IP)" ]; then echo "사용법: make undrop <IP>"; exit 1; fi
-	@echo "차단 해제 중: $(DROP_IP)..."
-	docker compose exec -u root godns iptables -D INPUT -s $(DROP_IP) -j DROP
+	@echo "도커 경로에서 차단 해제 중: $(DROP_IP)..."
+	sudo iptables -D DOCKER-USER -s $(DROP_IP) -j DROP
+        sudo netfilter-persistent save
 	@echo "성공: $(DROP_IP) 차단이 해제되었습니다."
+
+# 차단 목록 확인
 list-drop:
-	docker compose exec -u root godns iptables -L INPUT -n --line-numbers
+	sudo iptables -L DOCKER-USER -n --line-numbers -v
