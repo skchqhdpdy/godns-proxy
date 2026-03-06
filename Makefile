@@ -2,10 +2,10 @@
 
 # 인자 처리 로직: 첫 번째 인자가 'drop' 또는 'undrop'일 경우 두 번째 인자를 IP로 취급
 ifeq ($(firstword $(MAKECMDGOALS)),$(filter $(firstword $(MAKECMDGOALS)),drop undrop))
-	# 두 번째 단어를 IP로 추출
-	DROP_IP := $(word 2, $(MAKECMDGOALS))
-	# IP 부분을 make가 타겟으로 오해하지 않도록 빈 타겟으로 정의
-	$(eval $(DROP_IP):;@:)
+  # 두 번째 단어를 IP로 추출
+  DROP_IP := $(word 2, $(MAKECMDGOALS))
+  # IP 부분을 make가 타겟으로 오해하지 않도록 빈 타겟으로 정의
+  $(eval $(DROP_IP):;@:)
 endif
 
 build:
