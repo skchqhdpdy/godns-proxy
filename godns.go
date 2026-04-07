@@ -25,6 +25,7 @@ type Config struct {
 	RemoteAddr        string `json:"remoteAddr"`
 	LocalAddr         string `json:"localAddr"`
 	BlockDrop         int    `json:"blockDrop"`
+	AnyRecordDrop     int    `json:"anyRecordDrop"`
 }
 
 var defaultConfig = Config{
@@ -33,9 +34,10 @@ var defaultConfig = Config{
 	RemoteAddr:        "aodd.xyz:53",
 	LocalAddr:         "ns1.aodd.xyz",
 	BlockDrop:         1,
+	AnyRecordDrop:     0,
 }
 
-const version = "2.5.0"
+const version = "2.6.0"
 
 var dnstypes map[string]string
 var configFilePath string = getConfigPath()
@@ -447,6 +449,11 @@ func handleTCPConnection(localConn net.Conn, config Config) {
 	}
 	rqType, rqDomain := parseDNSRequest(buf[2 : 2+packetLen])
 
+	if config.AnyRecordDrop == 1 && rqType == "ANY" {
+		log.Printf("차단된 TYPE | TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
+		return
+	}
+
 	if IsIPBlocked(remoteIP) {
 		log.Printf("차단된 IP | TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
 		resp := RefusedResponse(buf[2 : 2+packetLen])
@@ -531,6 +538,12 @@ func startUDPForwarding(config Config) {
 		go func(data []byte, addr *net.UDPAddr) {
 			rqType, rqDomain := parseDNSRequest(data)
 			remoteIP := clientAddr.IP.String()
+
+			if config.AnyRecordDrop == 1 && rqType == "ANY" {
+				log.Printf("차단된 TYPE | TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
+				return
+			}
+
 			if IsIPBlocked(remoteIP) {
 				log.Printf("차단된 IP | UDP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
 				refusedResp := RefusedResponse(data)
@@ -637,12 +650,7 @@ func loadConfig() Config {
 }
 
 func getConfigPath() string {
-	var configFilePath string
-	if runtime.GOOS == "windows" {
-		configFilePath = `C:\godns\configGodns.json`
-	} else {
-		configFilePath = "/etc/godns/configGodns.json"
-	}
+	var configFilePath string = "configGodns.json"
 	dir := filepath.Dir(configFilePath)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err := os.MkdirAll(dir, 0755)
