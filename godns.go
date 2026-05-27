@@ -540,7 +540,7 @@ func startUDPForwarding(config Config) {
 			remoteIP := clientAddr.IP.String()
 
 			if config.AnyRecordDrop == 1 && rqType == "ANY" {
-				log.Printf("차단된 TYPE | TCP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
+				log.Printf("차단된 TYPE | UDP 패킷 차단: \033[91m%s\033[0m | Type: \033[91m%s\033[0m, Domain: \033[91m%s\033[0m | %d", remoteIP, rqType, rqDomain, time.Now().Unix())
 				return
 			}
 
